@@ -681,7 +681,7 @@ contains
       real(dp), external :: dznrm2                                      ! LAPACK function for euclidean norm
 
       ! Krylov subspace parameters
-      complex(dp), allocatable :: basis_MK(:, :)                        ! Krylov subspaces
+      complex(dp), allocatable :: basis_MK(:, :), Kbasis_MK(:, :)       ! Krylov subspaces
       complex(dp), allocatable :: Hmat_MK(:, :)                         ! Hessenberg matrices
       complex(dp), allocatable :: copyHmat_MK(:, :)                     ! Copy of Hessenberg matrices; for reorthogonalization and zgeev
       real(dp) :: betanrm                                               ! For norm of the basis vectors
@@ -778,10 +778,11 @@ contains
       ! a) MK problem
       !
       ! Set [Z;0]
+      ZZ = basis_MK(:, 1)
       do i=1,nxy
-         dRqp_re%m12%elem(i) = dble(basis_MK(i, 1))
+         dRqp_re%m12%elem(i) = dble(ZZ(i))
          dRqp_re%m21%elem(i) = 0.d0
-         dRqp_im%m12%elem(i) = dimag(basis_MK(i, 1))
+         dRqp_im%m12%elem(i) = dimag(ZZ(i))
          dRqp_im%m21%elem(i) = 0.d0
       end do
       ! Do matvec and get [AZ;BZ]
@@ -791,9 +792,10 @@ contains
          BZ(i) = dcmplx(temp_re%m21%elem(i), temp_im%m21%elem(i))
       end do
       ! KZ = AZ - BZ
-      ZZ = AZ - BZ
-      betanrm = sqrt(real(dot_product(basis_MK(:, 1), ZZ)))
-      basis_MK(:, 1) = basis_MK(:, 1) / betanrm
+      AZ = AZ - BZ
+      betanrm = sqrt(real(dot_product(ZZ, AZ)))
+      basis_MK(:, 1) = ZZ / betanrm
+      Kbasis_MK(:, 1) = AZ / betanrm
       !
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
       ! End of first basis vector normalization!
@@ -821,9 +823,9 @@ contains
          !
          ! K * basis_MK(:, iter) == ZZ / betanrm
          do i=1,nxy
-            dRqp_re%m12%elem(i) = dble(ZZ(i)/betanrm)
+            dRqp_re%m12%elem(i) = dble(Kbasis_MK(i, iter))
             dRqp_re%m21%elem(i) = 0.d0
-            dRqp_im%m12%elem(i) = dimag(ZZ(i)/betanrm)
+            dRqp_im%m12%elem(i) = dimag(Kbasis_MK(i, iter))
             dRqp_im%m21%elem(i) = 0.d0
          end do
          ! Do matvec and get [AKZ;BKZ]
@@ -834,73 +836,23 @@ contains
          end do
          ! MKZ = AKZ+BKZ
          ZZ = AZ + BZ
-         ! Store into basis
-         do i = 1,nxy
-            basis_MK(i, iter+1) = ZZ(i)
+         !
+         ! b) K-orthogonalize twice
+         !
+         Hmat_MK(1:iter+1, iter) = czero
+         do i = 1, 2
+            call zgemv('C', nxy, iter, cone, Kbasis_MK, nxy, ZZ, 1, czero, coeff, 1)
+            Hmat_MK(1:iter, iter) = Hmat_MK(1:iter, iter) + coeff(1:iter)
+            call zgemv('N', nxy, iter, -cone, basis_MK, nxy, coeff, 1, cone, ZZ, 1)
          end do
          !
-         ! b) K-inner product of MKZ
+         ! c) Normalize current basis vector w.r.t. K
          !
-         ! Set [MKZ;0]
+         ! Set [Z;0]
          do i=1,nxy
             dRqp_re%m12%elem(i) = dble(ZZ(i))
             dRqp_re%m21%elem(i) = 0.d0
             dRqp_im%m12%elem(i) = dimag(ZZ(i))
-            dRqp_im%m21%elem(i) = 0.d0
-         end do
-         ! Do matvec and get [AMKZ;BMKZ]
-         call matvec(dRqp_re, dRqp_im, temp_re, temp_im)
-         do i = 1, nxy
-            AZ(i) = dcmplx(temp_re%m12%elem(i), temp_im%m12%elem(i))
-            BZ(i) = dcmplx(temp_re%m21%elem(i), temp_im%m21%elem(i))
-         end do
-         ! KMKZ = AMKZ-BMKZ
-         ZZ = AZ - BZ
-         !
-         ! c) Orthogonalize w.r.t. previous Krylov basis vectors
-         !
-         call zgemv('C', nxy, iter, cone, basis_MK, nxy, ZZ, 1, czero, Hmat_MK(1:iter, iter), 1)
-         call zgemv('N', nxy, iter, -cone, basis_MK, nxy, Hmat_MK(1:iter, iter), 1, cone, basis_MK(:, iter+1), 1)
-         !
-         ! d) Reorthogonalize
-         !
-         !    d)a) K-inner product of f:=basis_MK(:, iter+1)
-         !
-         ! Set [f;0]
-         do i=1,nxy
-            dRqp_re%m12%elem(i) = dble(basis_MK(i, iter+1))
-            dRqp_re%m21%elem(i) = 0.d0
-            dRqp_im%m12%elem(i) = dimag(basis_MK(i, iter+1))
-            dRqp_im%m21%elem(i) = 0.d0
-         end do
-         ! Do matvec and get [Af;Bf]
-         call matvec(dRqp_re, dRqp_im, temp_re, temp_im)
-         do i = 1, nxy
-            AZ(i) = dcmplx(temp_re%m12%elem(i), temp_im%m12%elem(i))
-            BZ(i) = dcmplx(temp_re%m21%elem(i), temp_im%m21%elem(i))
-         end do
-         ! Kf = Af-Bf
-         ZZ = AZ - BZ
-         !
-         !    d)b) Orthogonalize w.r.t. previous Krylov basis vectors
-         !
-         call zgemv('C', nxy, iter, cone, basis_MK, nxy, ZZ, 1, czero, copyHmat_MK(1:iter, iter), 1)
-         call zgemv('N', nxy, iter, -cone, basis_MK, nxy, copyHmat_MK(1:iter, iter), 1, cone, basis_MK(:, iter+1), 1)
-         Hmat_MK(1:iter, iter) = Hmat_MK(1:iter, iter) + copyHmat_MK(1:iter, iter)
-         ! Ensure Hmat is tridiagonal
-         if (iter > 2) then
-            do i = 1, iter-2
-               Hmat_MK(i, iter) = czero
-            enddo
-         end if
-         !
-         ! e) Normalize current basis vector w.r.t. K
-         !
-         ! Set [Z;0]
-         do i=1,nxy
-            dRqp_re%m12%elem(i) = dble(basis_MK(i, iter+1))
-            dRqp_re%m21%elem(i) = 0.d0
-            dRqp_im%m12%elem(i) = dimag(basis_MK(i, iter+1))
             dRqp_im%m21%elem(i) = 0.d0
          end do
          ! Do matvec and get [AZ;BZ]
@@ -910,10 +862,11 @@ contains
             BZ(i) = dcmplx(temp_re%m21%elem(i), temp_im%m21%elem(i))
          end do
          ! KZ = AZ-BZ
-         ZZ = AZ - BZ
-         betanrm = sqrt(real(dot_product(basis_MK(:, iter+1), ZZ)))
-         basis_MK(:, iter+1) = basis_MK(:, iter+1) / betanrm
+         AZ = AZ - BZ
+         betanrm = sqrt(real(dot_product(ZZ, AZ)))
          Hmat_MK(iter+1, iter) = betanrm
+         basis_MK(:, iter+1) = ZZ / betanrm
+         Kbasis_MK(:, iter+1) = AZ / betanrm
          !
          !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
          ! End Krylov subspace generation for MK !!
